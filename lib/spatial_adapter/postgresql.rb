@@ -1,6 +1,18 @@
 require 'spatial_adapter'
 require 'active_record/connection_adapters/postgresql_adapter'
 
+  begin
+    require_library_or_gem 'postgres'
+    class PGresult
+      alias_method :nfields, :num_fields unless self.method_defined?(:nfields)
+      alias_method :ntuples, :num_tuples unless self.method_defined?(:ntuples)
+      alias_method :ftype, :type unless self.method_defined?(:ftype)
+      alias_method :cmd_tuples, :cmdtuples unless self.method_defined?(:cmd_tuples)
+    end
+  rescue LoadError
+    raise e
+  end
+
 module ActiveRecord::ConnectionAdapters
   class PostgreSQLAdapter
     def postgis_version
@@ -42,6 +54,39 @@ module ActiveRecord::ConnectionAdapters
       else
         original_quote(value,column)
       end
+    end
+
+    # Queries the database and returns the results in an Array-like object
+    def query(sql, name = nil) #:nodoc:
+      log(sql, name) do
+        if @async
+          res = @connection.async_exec(sql)
+        else
+          res = @connection.execute(sql)
+        end
+        return result_as_array(res)
+      end
+    end
+
+    # create a 2D array representing the result set
+    def result_as_array(res) #:nodoc:
+      # check if we have any binary column and if they need escaping
+      unescape_col = []
+      for j in 0...res.nfields do
+        # unescape string passed BYTEA field (OID == 17)
+        unescape_col << ( res.ftype(j)==17 )
+      end
+
+      ary = []
+      for i in 0...res.ntuples do
+        ary << []
+        for j in 0...res.nfields do
+          data = res.getvalue(i,j)
+          data = unescape_bytea(data) if unescape_col[j] and data.is_a?(String)
+          ary[i] << data
+        end
+      end
+      return ary
     end
 
     def columns(table_name, name = nil) #:nodoc:
@@ -329,7 +374,7 @@ module ActiveRecord::ConnectionAdapters
       @geographic
     end
 
-    #Transforms a string to a geometry. PostGIS returns a HewEWKB string.
+    #Transforms a string to a geometry. PostGIS returns a HexEWKB string.
     def self.string_to_geometry(string)
       return string unless string.is_a?(String)
       GeoRuby::SimpleFeatures::Geometry.from_hex_ewkb(string) rescue nil
